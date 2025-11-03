@@ -1,0 +1,200 @@
+---
+title: "Assignment 4"
+subtitle: "Due at 11:59pm on November 4."
+format: pdf
+editor: visual
+---
+
+GitHub repo: <https://github.com/Sylviey77/survmeth727-assignment4.git>
+
+```{r}
+#| include: false 
+library(tidyverse)
+library(DBI)
+library(dbplyr)
+library(bigrquery)
+```
+
+```{r}
+project <- "surv-727-assignment4"
+```
+
+We will connect to a public database, the Chicago crime database, which has data on crime in Chicago.
+
+```{r}
+con <- dbConnect(
+  bigrquery::bigquery(),
+  project = "bigquery-public-data",
+  dataset = "chicago_crime",
+  billing = project
+)
+con
+```
+
+We can look at the available tables in this database using `dbListTables`.
+
+**Note**: When you run this code, you will be sent to a browser and have to give Google permissions to Tidyverse API Packages. **Make sure you select all to give access or else your code will not run.**
+
+```{r}
+dbListTables(con)
+```
+
+Information on the \`crime\` table can be found here:
+
+<https://cloud.google.com/bigquery/public-data/chicago-crime-data>
+
+Write a first query that counts the number of rows of the \`crime\` table in the year 2016. Use code chunks with {sql connection = con} in order to write SQL code within the document.
+
+```{sql connection = con}
+SELECT count(primary_type) AS primary_count, count(*) AS overall_count -- counting non-missing primary count and overall
+FROM crime 
+WHERE year = 2016 
+LIMIT 10;
+```
+
+Next, count the number of arrests grouped by `primary_type` in 2016. Note that is a somewhat similar task as above, with some adjustments on which rows should be considered. Sort the results, i.e. list the number of arrests in a descending order.
+
+```{sql connection=con}
+SELECT
+  primary_type,
+  COUNTIF(arrest) AS arrests_2016
+FROM crime
+WHERE year = 2016
+GROUP BY primary_type
+ORDER BY arrests_2016 DESC;
+```
+
+We can also use the `date` for grouping. Count the number of arrests grouped by hour of the day in 2016. You can extract the latter information from `date` via `EXTRACT(HOUR FROM date)`. Which time of the day is associated with the most arrests?
+
+```{sql connection=con}
+SELECT
+  EXTRACT(HOUR FROM date) AS hour_of_day,
+  COUNTIF(arrest)         AS arrests_2016
+FROM crime
+WHERE year = 2016
+GROUP BY hour_of_day
+ORDER BY arrests_2016 DESC;
+```
+
+Answer: Arrests in 2016 peak in the early evening—**19** has the highest count at **3,843**, followed by **18** and **20**.
+
+Focus only on `HOMICIDE` and count the number of arrests for this incident type, grouped by year. List the results in descending order.
+
+```{sql connection=con}
+SELECT
+  year,
+  COUNTIF(arrest) AS homicide_arrests
+FROM crime
+WHERE primary_type = 'HOMICIDE'
+GROUP BY year
+ORDER BY homicide_arrests DESC;
+```
+
+Find out which districts have the highest numbers of arrests in 2015 and 2016. That is, count the number of arrests in 2015 and 2016, grouped by year and district. List the results in descending order.
+
+```{sql connection=con}
+SELECT
+  year,
+  SAFE_CAST(district AS INT64) AS district,   -- coerce if stored as STRING
+  COUNTIF(arrest) AS arrests
+FROM crime
+WHERE year IN (2015, 2016)
+  AND district IS NOT NULL
+GROUP BY year, district
+ORDER BY arrests DESC, year, district;
+```
+
+Lets switch to writing queries from within R via the `DBI` package. Create a query object that counts the number of arrests grouped by `primary_type` of district 11 in year 2016. The results should be displayed in descending order.
+
+Execute the query.
+
+```{r}
+qry_txt <- "
+SELECT
+  primary_type,
+  COUNTIF(arrest) AS arrests_2016_d11
+FROM crime
+WHERE year = 2016
+  AND SAFE_CAST(district AS INT64) = 11   -- robust if district is stored as text
+GROUP BY primary_type
+ORDER BY arrests_2016_d11 DESC
+"
+# 1) Create the query object (DBIResult cursor)
+qry <- DBI::dbSendQuery(con, qry_txt)
+
+# 2) Fetch all rows into an R data.frame
+res_dbi <- DBI::dbFetch(qry)
+
+# 3) Always clear the result
+DBI::dbClearResult(qry)
+
+# Peek
+head(res_dbi, 10)
+```
+
+Try to write the very same query, now using the `dbplyr` package. For this, you need to first map the `crime` table to a tibble object in R.
+
+```{r}
+crime_tbl <- dplyr::tbl(con, "crime")
+
+res_dbplyr <- crime_tbl %>%
+  dplyr::filter(year == 2016, as.integer(district) == 11) %>%
+  dplyr::group_by(primary_type) %>%
+  dplyr::summarise(
+    arrests_2016_d11 = sum(as.integer(arrest), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(dplyr::desc(arrests_2016_d11))
+
+res_dbplyr
+```
+
+Again, count the number of arrests grouped by `primary_type` of district 11 in year 2016, now using `dplyr` syntax.
+
+```{r}
+res_dbplyr_2016_d11 <- crime_tbl %>%
+  dplyr::filter(year == 2016, as.integer(district) == 11) %>%
+  dplyr::group_by(primary_type) %>%
+  dplyr::summarise(
+    arrests_2016_d11 = sum(as.integer(arrest), na.rm = TRUE),  #
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(dplyr::desc(arrests_2016_d11))
+
+res_dbplyr_2016_d11 %>% head(10)
+
+res_2016_d11_local <- res_dbplyr_2016_d11 %>% dplyr::collect()
+head(res_2016_d11_local, 10)
+
+```
+
+Count the number of arrests grouped by `primary_type` and `year`, still only for district 11. Arrange the result by `year`.
+
+Assign the results of the query above to a local R object.
+
+Confirm that you pulled the data to the local environment by displaying the first ten rows of the saved data set.
+
+```{r}
+crime_tbl <- dplyr::tbl(con, "crime")
+
+res_d11_by_type_year <- crime_tbl %>%
+  dplyr::filter(as.integer(district) == 11) %>%               
+  dplyr::group_by(year, primary_type) %>%                       
+  dplyr::summarise(
+    arrests = sum(as.integer(arrest), na.rm = TRUE),           
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(year)                                          
+
+res_d11_by_type_year %>% head(10)
+
+arrests_11_by_type_year <- res_d11_by_type_year %>% dplyr::collect()
+
+head(arrests_11_by_type_year, 10)
+```
+
+Close the connection.
+
+```{r}
+DBI::dbDisconnect(con)
+```
